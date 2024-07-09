@@ -3,7 +3,7 @@ This repository contains a Streamlit-based web application for document question
 
 ### Specifications
 - The framework is able to work on local or on internet via *ngrok*.
-- The framework has a memory so you don't need to upload the same pdf files again.
+- The framework has a memory so you don't need to upload the same pdf files again for each run.
 - By changing the database name in the code, you can create different models for different tasks (best base models according to experiments *mistral* and *qwen2*).
 - To add a new base model, use `ollama pull model_name` (for example, ollama pull aya:8b). The alternative base models can be found [here](https://ollama.com/library).
 - If you push "Clear Uploads" button, you will delete the whole database.
