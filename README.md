@@ -16,7 +16,7 @@ This repository contains a Streamlit-based web application for document question
 ![AV_Module](https://github.com/Yigit-Kuyu/LLM-on-Local/blob/main/Interface.jpg)
 
 ### Running on local
-`streamlit run streamlit_app_multipdf_V4.py`
+`streamlit run LLM_V4.py`
 This will create a database in your local and network to the local host with port number 8501. Thats all.
 
 ### Running on the internet
