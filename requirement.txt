@@ -1,0 +1,6 @@
+streamlit
+logging
+tempfile
+ollama
+pdfplumber
+langchain

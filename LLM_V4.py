@@ -19,6 +19,12 @@ import os
 from pathlib import Path
 import logging
 from langchain.document_loaders import PyPDFLoader
+from langchain.chains import LLMChain
+from langchain.retrievers import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import LLMChainExtractor
+from langchain.prompts import PromptTemplate
+import random
+
 
 st.set_page_config(page_title="YcK UI", page_icon="🎈", layout="wide")
 
@@ -29,49 +35,46 @@ logger = logging.getLogger(__name__)
 PERSIST_DIRECTORY = Path("./persistent_db_yck")
 
 
-def create_or_update_vector_db(uploaded_files) -> Chroma:
+def create_or_update_vector_db(uploaded_files=None) -> Chroma:
     PERSIST_DIRECTORY.mkdir(exist_ok=True)
     
     embedding_function = OllamaEmbeddings(model="nomic-embed-text")
+    # Always try to load existing database
+    vector_db = Chroma(persist_directory=str(PERSIST_DIRECTORY), embedding_function=embedding_function)
+    logger.info(f"Loaded vector database with {vector_db._collection.count()} documents")
+
+    if uploaded_files:
     
-    # Load existing database if it exists, otherwise create a new one
-    if PERSIST_DIRECTORY.exists() and any(PERSIST_DIRECTORY.iterdir()):
-        vector_db = Chroma(persist_directory=str(PERSIST_DIRECTORY), embedding_function=embedding_function)
-        logger.info(f"Loaded existing vector database with {vector_db._collection.count()} documents")
-    else:
-        vector_db = Chroma(persist_directory=str(PERSIST_DIRECTORY), embedding_function=embedding_function)
-        logger.info("Created new vector database")
+        all_chunks = []
+        for file_upload in uploaded_files:
+            try:
+                temp_dir = tempfile.mkdtemp()
+                path = os.path.join(temp_dir, file_upload.name)
+                with open(path, "wb") as f:
+                    f.write(file_upload.getvalue())
+            
+                # Use PyPDFLoader instead of UnstructuredPDFLoader
+                loader = PyPDFLoader(path)
+                pages = loader.load_and_split()
+            
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+                chunks = text_splitter.split_documents(pages)
+            
+                all_chunks.extend(chunks)
+                logger.info(f"Successfully processed {file_upload.name}")
+            except Exception as e:
+                logger.error(f"Error processing {file_upload.name}: {str(e)}")
+                st.warning(f"Failed to process {file_upload.name}. This file will be skipped.")
+            finally:
+                shutil.rmtree(temp_dir)
     
-    all_chunks = []
-    for file_upload in uploaded_files:
-        try:
-            temp_dir = tempfile.mkdtemp()
-            path = os.path.join(temp_dir, file_upload.name)
-            with open(path, "wb") as f:
-                f.write(file_upload.getvalue())
-            
-            # Use PyPDFLoader instead of UnstructuredPDFLoader
-            loader = PyPDFLoader(path)
-            pages = loader.load_and_split()
-            
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            chunks = text_splitter.split_documents(pages)
-            
-            all_chunks.extend(chunks)
-            logger.info(f"Successfully processed {file_upload.name}")
-        except Exception as e:
-            logger.error(f"Error processing {file_upload.name}: {str(e)}")
-            st.warning(f"Failed to process {file_upload.name}. This file will be skipped.")
-        finally:
-            shutil.rmtree(temp_dir)
-    
-    if all_chunks:
-        # Add new documents to the existing database
-        vector_db.add_documents(all_chunks)
-        vector_db.persist()
-        logger.info(f"Added {len(all_chunks)} chunks to the vector database")
-    else:
-        logger.warning("No documents were successfully processed")
+        if all_chunks:
+            # Add new documents to the existing database
+            vector_db.add_documents(all_chunks)
+            vector_db.persist()
+            logger.info(f"Added {len(all_chunks)} chunks to the vector database")
+        else:
+            logger.warning("No documents were successfully processed")
     
     return vector_db
 
@@ -88,96 +91,95 @@ def extract_model_names(models_info: Dict[str, List[Dict[str, Any]]]) -> Tuple[s
     return tuple(model["name"] for model in models_info["models"])
 
 
-'''
-def create_vector_db(uploaded_files) -> Chroma:
-    all_chunks = []
-    for file_upload in uploaded_files:
-        temp_dir = tempfile.mkdtemp()
-        path = os.path.join(temp_dir, file_upload.name)
-        with open(path, "wb") as f:
-            f.write(file_upload.getvalue())
-        chunks = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=200).split_documents(UnstructuredPDFLoader(path).load())
-        all_chunks.extend(chunks)
-        shutil.rmtree(temp_dir)
-    return Chroma.from_documents(documents=all_chunks, embedding=OllamaEmbeddings(model="nomic-embed-text"), collection_name="myRAG")
+prompt_template = """
+Task: Provide a detailed and comprehensive answer to the given question based on the provided context.
 
-'''
+Context:
+{context}
 
-prompt_template="""
-            Task: Answer the given question based solely on the provided context.
+Question: {question}
 
-            Context:
-            {context}
+Previous Question (if any): {previous_question}
 
-            Question: {question}
+Instructions:
+1. Analyze the context thoroughly and provide a detailed answer.
+2. Structure your response using bullet points or numbered lists for clarity.
+3. Include specific details, dates, and relevant information from the context.
+4. If this is a follow-up question, focus on aspects not covered in the previous answer.
+5. Use direct quotes from the context, citing them with quotation marks.
+6. If the context doesn't provide enough information, clearly state what's missing.
+7. Provide any relevant background information or context that helps answer the question.
+8. If applicable, mention achievements, skills, or experiences highlighted in the context.
+9. If applicable, you should write 2 paragraphs at least.
 
-            Instructions:
-            1. Carefully read the context and question.
-            2. If the answer is explicitly stated in the context, provide it directly.
-            3. If the answer can be inferred from the context, explain your reasoning.
-            4. If the answer cannot be determined from the context, state "I don't have enough information to answer this question based on the given context."
-            5. Do not use any external knowledge or make assumptions beyond the provided context.
-            6. Include relevant quotes from the context to support your answer, using quotation marks.
-            7. Keep your answer concise and to the point.
+Output Format:
+Answer: [Your detailed, structured answer here]
+Supporting Evidence: [Relevant quote(s) from the context]
+Confidence: [High/Medium/Low] - Explain your confidence level
 
-            Output Format:
-            Answer: [Your answer here]
-            Supporting Evidence: [Relevant quote(s) from the context]
-            Confidence: [High/Medium/Low] - Based on how directly the context addresses the question
-
-            Example:
-            Context: The Eiffel Tower was completed in 1889. It stands 324 meters tall and was the tallest man-made structure in the world for 41 years.
-            Question: When was the Eiffel Tower built?
-            Answer: The Eiffel Tower was completed in 1889.
-            Supporting Evidence: "The Eiffel Tower was completed in 1889."
-            Confidence: High
-
-            Now, please provide your answer to the given question:
-            """
-
-# This prompt is for generating multiple queries
-multi_query_prompt = """
-Given the following question, please generate 3 different versions of the question to help retrieve relevant information from a vector database:
-
-Original question: {question}
-
-1.
-2.
-3.
+Now, please provide your comprehensive answer to the given question:
 """
 
-def process_question(question: str, vector_db: Chroma, selected_model: str) -> str:
-    llm = ChatOllama(model=selected_model, temperature=0.0)
-    # Use the multi_query_prompt for the MultiQueryRetriever
-    multi_query_prompt_template = PromptTemplate(
+def generate_query_variations(question: str, llm: ChatOllama) -> List[str]:
+    variation_prompt = PromptTemplate(
         input_variables=["question"],
-        template=multi_query_prompt
+        template="Generate 3 variations of the following question, maintaining its core meaning:\n\nOriginal: {question}\n\n1."
     )
-    
-    retriever = MultiQueryRetriever.from_llm(
-        vector_db.as_retriever(),
-        llm,
-        prompt=multi_query_prompt_template
-    )
+    variation_chain = LLMChain(llm=llm, prompt=variation_prompt)
+    variations = variation_chain.run(question).split("\n")
+    return [question] + [v.split(". ", 1)[1] for v in variations if ". " in v]
 
+
+def process_question(question: str, vector_db: Chroma, selected_model: str,previous_question: str = "") -> str:
+    llm = ChatOllama(model=selected_model, temperature=0.2)
     
+     # Generate query variations
+    query_variations = generate_query_variations(question, llm)
+    retriever = vector_db.as_retriever(search_kwargs={"k": 5})
+    
+    compression_retriever = ContextualCompressionRetriever(
+        base_compressor=LLMChainExtractor.from_llm(llm),
+        base_retriever=retriever
+    )
+    all_docs = []
+    for query in query_variations:
+        docs = compression_retriever.get_relevant_documents(query)
+        all_docs.extend(docs)
+    
+    # Remove duplicates and randomly sample if too many
+    unique_docs = []
+    seen_contents = set()
+    for doc in all_docs:
+        if doc.page_content not in seen_contents:
+            unique_docs.append(doc)
+            seen_contents.add(doc.page_content)
+    # Randomly sample if too many
+    if len(unique_docs) > 10:
+        unique_docs = random.sample(unique_docs, 10)
+    
+    if not unique_docs:
+        return "Answer: I don't have unique information to answer this question based on the given context. Confidence: Low"
+
+    context = "\n\n".join([doc.page_content for doc in unique_docs])
+    
+
     # Retrieve relevant context
     retrieved_docs = retriever.get_relevant_documents(question)
     if not retrieved_docs:
         return "Answer: I don't have enough information to answer this question based on the given context. Confidence: Low"
     
     
-    # Combine retrieved documents into a single string for the context
-    context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+    # Combine retrieved documents, penalizing repetition
+    #context = "\n\n".join(set([doc.page_content for doc in retrieved_docs]))  # Deduplicate
     
     # Use the prompt_template in the final QA step
     qa_prompt = PromptTemplate(
-        input_variables=["context", "question"],
+        input_variables=["context", "question", "previous_question"],
         template=prompt_template
     )
     
     rag_chain = (
-        {"context": lambda x: context, "question": RunnablePassthrough()}
+        {"context": lambda x: context, "question": RunnablePassthrough(), "previous_question": lambda x: previous_question}
         | qa_prompt
         | llm
         | StrOutputParser()
@@ -201,9 +203,12 @@ def main() -> None:
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
     if "vector_db" not in st.session_state:
-        st.session_state["vector_db"] = None
+        #st.session_state["vector_db"] = None
+        st.session_state["vector_db"] = create_or_update_vector_db()
         if "vector_db" not in st.session_state and PERSIST_DIRECTORY.exists() and any(PERSIST_DIRECTORY.iterdir()):
             st.session_state["vector_db"] = Chroma(persist_directory=str(PERSIST_DIRECTORY), embedding_function=OllamaEmbeddings(model="nomic-embed-text"))
+    if "previous_question" not in st.session_state:
+        st.session_state["previous_question"] = ""
 
     selected_model = col2.selectbox("Pick a model available locally on your system ↓", available_models) if available_models else None
     file_upload = col1.file_uploader("Upload PDF file(s) ↓", type="pdf", accept_multiple_files=True)
@@ -226,28 +231,28 @@ def main() -> None:
             with message_container.chat_message(message["role"], avatar="🤖" if message["role"] == "assistant" else "😎"):
                 st.markdown(message["content"])
 
-        # Disable chat input while files are being processed
-        # Disable chat input while files are being processed OR database is not ready
-        input_disabled = (file_upload is not None and "vector_db" not in st.session_state) or (
-            "vector_db" in st.session_state and st.session_state["vector_db"] is None
-        )
-        prompt = st.chat_input("Enter a prompt here...", disabled=input_disabled)
+        
+        prompt = st.chat_input("Enter a prompt here...")
         
         if prompt:
+            # Add user message
             st.session_state["messages"].append({"role": "user", "content": prompt})
-            message_container.chat_message("user", avatar="🤖").markdown(prompt)
-            with message_container.chat_message("assistant", avatar="😎"):
+            with message_container.chat_message("user", avatar="😎"):
+                st.markdown(prompt)
+
+            # Generate and display response
+            if st.session_state["vector_db"] is not None:
                 with st.spinner(":green[processing...]"):
-                    if st.session_state["vector_db"] is not None:
-                        response = process_question(prompt, st.session_state["vector_db"], selected_model)
-                        st.markdown(response)
-                        st.session_state["messages"].append({"role": "assistant", "content": response})
-                    else:
-                        st.warning("Please upload PDF file(s) first.")
-        elif st.session_state["vector_db"] is None:
-            st.warning("Upload PDF file(s) to begin chat...")
-
-
+                    response = process_question(prompt, st.session_state["vector_db"], selected_model, st.session_state["previous_question"])
+                
+                st.session_state["messages"].append({"role": "assistant", "content": response})
+                with message_container.chat_message("assistant", avatar="🤖"):
+                    st.markdown(response)
+                
+                st.session_state["previous_question"] = prompt
+            else:
+                with message_container.chat_message("assistant", avatar="🤖"):
+                    st.warning("No documents have been uploaded yet. The response may not be accurate or relevant.")
 
 
 if __name__ == "__main__":
